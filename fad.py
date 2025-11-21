@@ -2,230 +2,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 import io
 import base64
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
-
-try:
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    from statsmodels.tsa.arima.model import ARIMA
-    from pmdarima import auto_arima
-    FORECASTING_AVAILABLE = True
-except ImportError as e:
-    FORECASTING_AVAILABLE = False
-    st.error(f"Forecasting packages not available: {e}")
 
 # Page configuration
 st.set_page_config(
     page_title="Sales Forecasting App",
     page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
-
-class SalesForecaster:
-    def __init__(self):
-        self.models = {}
-        
-    def prepare_data(self, historical_data, item_id=None, customer_name=None):
-        """Prepare time series data from raw sales data"""
-        try:
-            df = historical_data.copy()
-            
-            # Convert date column
-            df['Posting Date'] = pd.to_datetime(df['Posting Date'])
-            df['Month'] = df['Posting Date'].dt.to_period('M').dt.to_timestamp()
-            
-            # Apply accounting convention
-            df['Sales_Quantity'] = np.where(df['Invoiced Quantity'] < 0, 
-                                          abs(df['Invoiced Quantity']), 0)
-            df['Sales_Revenue'] = np.where(df['Sales Amount'] > 0, 
-                                         df['Sales Amount'], 0)
-            
-            # Aggregate by month, item, and customer
-            monthly_data = df.groupby(['Month', 'Item No', 'Name']).agg({
-                'Sales_Revenue': 'sum',
-                'Sales_Quantity': 'sum',
-                'Posting Date': 'count'
-            }).reset_index()
-            
-            monthly_data = monthly_data.rename(columns={'Posting Date': 'Transaction_Count'})
-            
-            # Apply filters if specified
-            if item_id:
-                monthly_data = monthly_data[monthly_data['Item No'] == item_id]
-            if customer_name:
-                monthly_data = monthly_data[monthly_data['Name'] == customer_name]
-                
-            return monthly_data.sort_values('Month')
-            
-        except Exception as e:
-            raise Exception(f"Data preparation error: {str(e)}")
-    
-    def fit_model(self, ts_vector, model_type='ets', horizon=6):
-        """Generic model fitting function"""
-        try:
-            if len(ts_vector) < 12:
-                return None
-                
-            if model_type == 'ets':
-                model = ExponentialSmoothing(
-                    ts_vector,
-                    seasonal_periods=min(12, len(ts_vector)//2),
-                    trend='add',
-                    seasonal='add' if len(ts_vector) >= 24 else None
-                ).fit()
-                forecast = model.forecast(horizon)
-                residuals = model.resid
-                aic = getattr(model, 'aic', None)
-                
-            elif model_type == 'arima':
-                model = auto_arima(
-                    ts_vector,
-                    seasonal=True,
-                    m=min(12, len(ts_vector)//2),
-                    stepwise=True,
-                    suppress_warnings=True,
-                    error_action='ignore'
-                )
-                forecast = model.predict(n_periods=horizon)
-                residuals = model.resid()
-                aic = model.aic()
-                
-            else:
-                return None
-                
-            return {
-                'model': model,
-                'forecast': forecast.values if hasattr(forecast, 'values') else forecast,
-                'residuals': residuals,
-                'aic': aic
-            }
-        except Exception as e:
-            print(f"{model_type.upper()} model error: {e}")
-            return None
-    
-    def forecast(self, historical_data, item_id, customer_name, horizon=6):
-        """Main forecasting function for both revenue and quantity"""
-        try:
-            # Prepare data
-            ts_data = self.prepare_data(historical_data, item_id, customer_name)
-            
-            if len(ts_data) < 12:
-                return {
-                    'error': f'Insufficient data: only {len(ts_data)} months available (need at least 12)'
-                }
-            
-            # Forecast revenue
-            revenue_forecast = self.fit_model(ts_data['Sales_Revenue'].values, 'ets', horizon)
-            quantity_forecast = self.fit_model(ts_data['Sales_Quantity'].values, 'ets', horizon)
-            
-            # Generate future dates
-            last_date = pd.to_datetime(ts_data['Month'].iloc[-1])
-            future_dates = [last_date + pd.DateOffset(months=i+1) for i in range(horizon)]
-            
-            return {
-                'success': True,
-                'revenue_forecast': revenue_forecast['forecast'] if revenue_forecast else None,
-                'quantity_forecast': quantity_forecast['forecast'] if quantity_forecast else None,
-                'future_dates': future_dates,
-                'historical_data': ts_data,
-                'last_historical_revenue': ts_data['Sales_Revenue'].iloc[-1],
-                'last_historical_quantity': ts_data['Sales_Quantity'].iloc[-1],
-                'forecast_horizon': horizon
-            }
-            
-        except Exception as e:
-            return {
-                'error': f'Forecasting error: {str(e)}'
-            }
-
-def create_matplotlib_plot(historical_data, revenue_forecast, quantity_forecast, future_dates, title):
-    """Create matplotlib plot for forecasts"""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-    
-    # Revenue plot
-    ax1.plot(historical_data['Month'], historical_data['Sales_Revenue'], 
-             label='Historical Revenue', color='blue', linewidth=2, marker='o')
-    ax1.plot(future_dates, revenue_forecast, 
-             label='Revenue Forecast', color='red', linewidth=2, linestyle='--', marker='s')
-    ax1.set_title(f'{title} - Revenue', fontsize=14, fontweight='bold')
-    ax1.set_ylabel('Revenue ($)', fontsize=12)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Quantity plot
-    ax2.plot(historical_data['Month'], historical_data['Sales_Quantity'], 
-             label='Historical Quantity', color='green', linewidth=2, marker='o')
-    ax2.plot(future_dates, quantity_forecast, 
-             label='Quantity Forecast', color='orange', linewidth=2, linestyle='--', marker='s')
-    ax2.set_title(f'{title} - Quantity', fontsize=14, fontweight='bold')
-    ax2.set_ylabel('Quantity', fontsize=12)
-    ax2.set_xlabel('Date', fontsize=12)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    return fig
 
 def main():
     st.title("📈 Sales Forecasting Dashboard")
+    st.markdown("""
+    This app provides sales forecasting capabilities using simple moving averages 
+    and trend analysis. Upload your sales data to get started.
+    """)
     
-    # Initialize forecaster
-    if 'forecaster' not in st.session_state:
-        st.session_state.forecaster = SalesForecaster()
-    if 'batch_results' not in st.session_state:
-        st.session_state.batch_results = None
-    
-    if not FORECASTING_AVAILABLE:
-        st.error("""
-        ❌ Required forecasting packages are not available. 
-        Please ensure your requirements.txt includes:
-        - statsmodels
-        - pmdarima
-        - scikit-learn
-        """)
-        return
+    # Initialize session state
+    if 'sales_data' not in st.session_state:
+        st.session_state.sales_data = None
     
     # Sidebar navigation
     st.sidebar.title("Navigation")
-    app_mode = st.sidebar.selectbox(
+    app_mode = st.sidebar.radio(
         "Choose Mode",
-        ["Data Upload", "Single Item Forecast", "Batch Forecast", "Download Center"]
+        ["Data Upload", "Simple Forecast", "Data Analysis", "Export Data"]
     )
     
     if app_mode == "Data Upload":
         show_data_upload()
-    elif app_mode == "Single Item Forecast":
-        show_single_forecast()
-    elif app_mode == "Batch Forecast":
-        show_batch_forecast()
-    elif app_mode == "Download Center":
-        show_download_center()
+    elif app_mode == "Simple Forecast":
+        show_simple_forecast()
+    elif app_mode == "Data Analysis":
+        show_data_analysis()
+    elif app_mode == "Export Data":
+        show_export_data()
 
 def show_data_upload():
-    st.header("📁 Data Upload & Preview")
+    st.header("📁 Data Upload")
     
     uploaded_file = st.file_uploader(
-        "Upload your sales data (Excel or CSV)",
-        type=['xlsx', 'xls', 'csv'],
+        "Upload your sales data (CSV or Excel)",
+        type=['csv', 'xlsx', 'xls'],
         help="Required columns: Posting Date, Item No, Name, Invoiced Quantity, Sales Amount"
     )
     
     if uploaded_file is not None:
         try:
+            # Read the file
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)
             else:
                 df = pd.read_excel(uploaded_file)
             
+            # Basic validation
+            required_cols = ['Posting Date', 'Item No', 'Name', 'Invoiced Quantity', 'Sales Amount']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                st.error(f"Missing required columns: {', '.join(missing_cols)}")
+                return
+            
             st.session_state.sales_data = df
             st.success("✅ Data uploaded successfully!")
             
-            # Data preview
+            # Show basic stats
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Total Records", len(df))
@@ -234,204 +77,269 @@ def show_data_upload():
             with col3:
                 st.metric("Unique Customers", df['Name'].nunique())
             with col4:
-                total_sales = df[df['Invoiced Quantity'] < 0]['Invoiced Quantity'].sum()
-                st.metric("Total Sales Quantity", f"{-total_sales:,.0f}")
+                # Calculate total sales quantity (negative values are sales)
+                sales_qty = df[df['Invoiced Quantity'] < 0]['Invoiced Quantity'].sum()
+                st.metric("Total Sales Quantity", f"{-sales_qty:,.0f}")
             
+            # Show data preview
             st.subheader("Data Preview")
             st.dataframe(df.head(10), use_container_width=True)
             
-            # Show basic data summary
+            # Data summary
             with st.expander("Show Data Summary"):
-                st.write(df.describe())
+                st.write("**Basic Statistics:**")
+                st.write(df[['Invoiced Quantity', 'Sales Amount']].describe())
                 
         except Exception as e:
             st.error(f"Error reading file: {str(e)}")
     else:
         st.info("👆 Please upload your sales data to get started")
 
-def show_single_forecast():
-    st.header("🔍 Single Item Forecast")
+def show_simple_forecast():
+    st.header("🔮 Simple Sales Forecast")
     
-    if 'sales_data' not in st.session_state:
+    if st.session_state.sales_data is None:
         st.warning("⚠️ Please upload data first in the 'Data Upload' section")
         return
     
     df = st.session_state.sales_data
     
-    col1, col2, col3 = st.columns(3)
+    # Process the data
+    processed_data = process_sales_data(df)
+    
+    # Forecasting options
+    col1, col2 = st.columns(2)
+    
     with col1:
-        items = df['Item No'].unique()
-        selected_item = st.selectbox("Select Item", items)
+        forecast_method = st.selectbox(
+            "Forecast Method",
+            ["Moving Average (3 months)", "Moving Average (6 months)", "Linear Trend"]
+        )
+    
     with col2:
-        customers = df[df['Item No'] == selected_item]['Name'].unique()
-        selected_customer = st.selectbox("Select Customer", customers)
-    with col3:
-        forecast_horizon = st.slider("Forecast Horizon (months)", 1, 12, 6)
+        forecast_months = st.slider("Months to Forecast", 1, 12, 3)
     
     if st.button("Generate Forecast", type="primary"):
         with st.spinner("Generating forecast..."):
             try:
-                result = st.session_state.forecaster.forecast(
-                    df, selected_item, selected_customer, forecast_horizon
-                )
+                # Generate forecasts for top items
+                top_items = get_top_items(processed_data, top_n=5)
+                forecasts = {}
                 
-                if 'error' in result:
-                    st.error(result['error'])
-                else:
-                    display_forecast_results(result, selected_item, selected_customer)
+                for item in top_items:
+                    item_data = processed_data[processed_data['Item No'] == item]
+                    monthly_sales = item_data.groupby('Month')['Sales_Revenue'].sum().sort_index()
                     
+                    if len(monthly_sales) >= 3:
+                        forecast = generate_simple_forecast(
+                            monthly_sales.values, 
+                            forecast_method, 
+                            forecast_months
+                        )
+                        forecasts[item] = {
+                            'historical': monthly_sales.values,
+                            'forecast': forecast,
+                            'last_date': monthly_sales.index[-1]
+                        }
+                
+                display_forecasts(forecasts, forecast_method)
+                
             except Exception as e:
-                st.error(f"Forecasting failed: {str(e)}")
+                st.error(f"Forecasting error: {str(e)}")
 
-def display_forecast_results(result, item, customer):
-    st.success("✅ Forecast generated successfully!")
+def process_sales_data(df):
+    """Process raw sales data into monthly aggregates"""
+    df_clean = df.copy()
+    df_clean['Posting Date'] = pd.to_datetime(df_clean['Posting Date'])
+    df_clean['Month'] = df_clean['Posting Date'].dt.to_period('M').dt.to_timestamp()
     
-    # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Last Month Revenue", f"${result['last_historical_revenue']:,.2f}")
-    with col2:
-        st.metric("Last Month Quantity", f"{result['last_historical_quantity']:,.0f}")
-    with col3:
-        avg_rev = np.mean(result['revenue_forecast'])
-        st.metric("Avg Revenue Forecast", f"${avg_rev:,.2f}")
-    with col4:
-        avg_qty = np.mean(result['quantity_forecast'])
-        st.metric("Avg Quantity Forecast", f"{avg_qty:,.0f}")
-    
-    # Matplotlib visualization
-    st.subheader("📊 Forecast Visualization")
-    fig = create_matplotlib_plot(
-        result['historical_data'],
-        result['revenue_forecast'],
-        result['quantity_forecast'],
-        result['future_dates'],
-        f"{item} - {customer}"
+    # Apply accounting convention
+    df_clean['Sales_Quantity'] = np.where(
+        df_clean['Invoiced Quantity'] < 0, 
+        abs(df_clean['Invoiced Quantity']), 
+        0
     )
-    st.pyplot(fig)
+    df_clean['Sales_Revenue'] = np.where(
+        df_clean['Sales Amount'] > 0, 
+        df_clean['Sales Amount'], 
+        0
+    )
     
-    # Forecast tables
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("💰 Revenue Forecast")
-        revenue_df = pd.DataFrame({
-            'Month': [d.strftime('%Y-%m') for d in result['future_dates']],
-            'Forecasted_Revenue': result['revenue_forecast']
-        })
-        st.dataframe(revenue_df.style.format({
-            'Forecasted_Revenue': '${:,.2f}'
-        }), use_container_width=True)
-    
-    with col2:
-        st.subheader("📦 Quantity Forecast")
-        quantity_df = pd.DataFrame({
-            'Month': [d.strftime('%Y-%m') for d in result['future_dates']],
-            'Forecasted_Quantity': result['quantity_forecast']
-        })
-        st.dataframe(quantity_df.style.format({
-            'Forecasted_Quantity': '{:,.0f}'
-        }), use_container_width=True)
-    
-    # Download section
-    st.subheader("💾 Download Forecast")
-    download_data = []
-    for i, (date, rev, qty) in enumerate(zip(result['future_dates'], 
-                                           result['revenue_forecast'], 
-                                           result['quantity_forecast'])):
-        download_data.append({
-            'Item_No': item,
-            'Customer': customer,
-            'Month': date.strftime('%Y-%m'),
-            'Revenue_Forecast': rev,
-            'Quantity_Forecast': qty
-        })
-    
-    download_df = pd.DataFrame(download_data)
-    csv = download_df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="forecast_{item}_{customer}.csv">📥 Download CSV</a>'
-    st.markdown(href, unsafe_allow_html=True)
+    return df_clean
 
-def show_batch_forecast():
-    st.header("📊 Batch Forecast")
+def get_top_items(processed_data, top_n=5):
+    """Get top selling items by revenue"""
+    item_sales = processed_data.groupby('Item No')['Sales_Revenue'].sum()
+    return item_sales.nlargest(top_n).index.tolist()
+
+def generate_simple_forecast(historical_data, method, months):
+    """Generate simple forecast using basic methods"""
+    if method == "Moving Average (3 months)":
+        # 3-month moving average
+        last_avg = np.mean(historical_data[-3:])
+        return [last_avg] * months
     
-    if 'sales_data' not in st.session_state:
+    elif method == "Moving Average (6 months)":
+        # 6-month moving average
+        last_avg = np.mean(historical_data[-6:])
+        return [last_avg] * months
+    
+    elif method == "Linear Trend":
+        # Simple linear trend
+        if len(historical_data) >= 3:
+            x = np.arange(len(historical_data))
+            trend = np.polyfit(x, historical_data, 1)
+            future_x = np.arange(len(historical_data), len(historical_data) + months)
+            return np.polyval(trend, future_x)
+        else:
+            last_value = historical_data[-1]
+            return [last_value] * months
+    
+    else:
+        last_value = historical_data[-1]
+        return [last_value] * months
+
+def display_forecasts(forecasts, method):
+    """Display forecast results"""
+    st.success(f"✅ Forecast generated using {method}")
+    
+    for item, data in forecasts.items():
+        with st.expander(f"📊 Forecast for {item}", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Last Month Revenue", f"${data['historical'][-1]:,.2f}")
+            with col2:
+                avg_forecast = np.mean(data['forecast'])
+                st.metric("Avg Forecast", f"${avg_forecast:,.2f}")
+            with col3:
+                change_pct = ((avg_forecast - data['historical'][-1]) / data['historical'][-1]) * 100
+                st.metric("Change", f"{change_pct:+.1f}%")
+            
+            # Simple text-based chart
+            st.write("**Forecast Trend:**")
+            hist_avg = np.mean(data['historical'][-3:])
+            forecast_avg = np.mean(data['forecast'])
+            
+            if forecast_avg > hist_avg * 1.1:
+                st.success("📈 Strong growth expected")
+            elif forecast_avg > hist_avg:
+                st.info("↗️ Moderate growth expected")
+            elif forecast_avg < hist_avg * 0.9:
+                st.warning("📉 Decline expected")
+            else:
+                st.info("➡️ Stable performance expected")
+            
+            # Forecast table
+            forecast_dates = [
+                (pd.to_datetime(data['last_date']) + pd.DateOffset(months=i+1)).strftime('%Y-%m')
+                for i in range(len(data['forecast']))
+            ]
+            
+            forecast_df = pd.DataFrame({
+                'Month': forecast_dates,
+                'Forecasted_Revenue': data['forecast']
+            })
+            
+            st.dataframe(forecast_df.style.format({
+                'Forecasted_Revenue': '${:,.2f}'
+            }), use_container_width=True)
+
+def show_data_analysis():
+    st.header("📊 Data Analysis")
+    
+    if st.session_state.sales_data is None:
         st.warning("⚠️ Please upload data first in the 'Data Upload' section")
         return
     
     df = st.session_state.sales_data
+    processed_data = process_sales_data(df)
     
-    st.info("This will generate forecasts for all item-customer combinations with sufficient data (≥12 months)")
+    # Basic analysis
+    st.subheader("Sales Summary")
     
-    if st.button("Run Batch Forecast", type="primary"):
-        with st.spinner("Running batch forecast... This may take a while"):
-            try:
-                # Simple batch processing demonstration
-                ts_data = st.session_state.forecaster.prepare_data(df)
-                combinations = ts_data.groupby(['Item No', 'Name']).agg({
-                    'Sales_Revenue': ['count', 'sum']
-                }).reset_index()
-                combinations.columns = ['Item No', 'Name', 'Months_Data', 'Total_Revenue']
-                viable_combinations = combinations[combinations['Months_Data'] >= 12]
-                
-                st.session_state.batch_results = {
-                    'viable_combinations': viable_combinations,
-                    'total_count': len(viable_combinations)
-                }
-                
-                st.success(f"✅ Found {len(viable_combinations)} viable item-customer combinations")
-                st.dataframe(viable_combinations.head(20), use_container_width=True)
-                
-            except Exception as e:
-                st.error(f"Batch analysis failed: {str(e)}")
+    # Top items
+    top_items = processed_data.groupby('Item No').agg({
+        'Sales_Revenue': 'sum',
+        'Sales_Quantity': 'sum'
+    }).nlargest(10, 'Sales_Revenue')
+    
+    st.write("**Top 10 Items by Revenue:**")
+    st.dataframe(top_items.style.format({
+        'Sales_Revenue': '${:,.2f}',
+        'Sales_Quantity': '{:,.0f}'
+    }), use_container_width=True)
+    
+    # Top customers
+    top_customers = processed_data.groupby('Name').agg({
+        'Sales_Revenue': 'sum',
+        'Sales_Quantity': 'sum'
+    }).nlargest(10, 'Sales_Revenue')
+    
+    st.write("**Top 10 Customers by Revenue:**")
+    st.dataframe(top_customers.style.format({
+        'Sales_Revenue': '${:,.2f}',
+        'Sales_Quantity': '{:,.0f}'
+    }), use_container_width=True)
+    
+    # Monthly trends
+    monthly_trends = processed_data.groupby('Month').agg({
+        'Sales_Revenue': 'sum',
+        'Sales_Quantity': 'sum'
+    }).reset_index()
+    
+    st.write("**Monthly Sales Trends:**")
+    st.dataframe(monthly_trends.style.format({
+        'Sales_Revenue': '${:,.2f}',
+        'Sales_Quantity': '{:,.0f}'
+    }), use_container_width=True)
 
-def show_download_center():
-    st.header("💾 Download Center")
+def show_export_data():
+    st.header("💾 Export Data")
     
-    if 'sales_data' not in st.session_state:
-        st.warning("⚠️ Please upload data first")
+    if st.session_state.sales_data is None:
+        st.warning("⚠️ Please upload data first in the 'Data Upload' section")
         return
     
-    st.info("Download processed data and forecast templates")
-    
     df = st.session_state.sales_data
+    processed_data = process_sales_data(df)
     
-    # Process data for download
-    processed_data = st.session_state.forecaster.prepare_data(df)
+    st.info("Export processed data for further analysis")
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("📈 Processed Monthly Data")
-        st.write("Aggregated monthly sales data by item and customer")
-        csv_processed = processed_data.to_csv(index=False)
-        b64 = base64.b64encode(csv_processed.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="processed_sales_data.csv">📥 Download Processed Data</a>'
+        st.write("Aggregated monthly sales by item and customer")
+        
+        monthly_data = processed_data.groupby(['Month', 'Item No', 'Name']).agg({
+            'Sales_Revenue': 'sum',
+            'Sales_Quantity': 'sum'
+        }).reset_index()
+        
+        csv_data = monthly_data.to_csv(index=False)
+        b64 = base64.b64encode(csv_data.encode()).decode()
+        href = f'<a href="data:file/csv;base64,{b64}" download="monthly_sales_data.csv">📥 Download Monthly Data (CSV)</a>'
         st.markdown(href, unsafe_allow_html=True)
         
-        st.dataframe(processed_data.head(10), use_container_width=True)
+        st.dataframe(monthly_data.head(10), use_container_width=True)
     
     with col2:
-        st.subheader("📋 Forecast Template")
-        st.write("Template for manual forecasting input")
-        # Create a simple template
-        unique_items = df['Item No'].unique()
-        template_data = []
-        for item in unique_items[:10]:  # Limit for demo
-            template_data.append({
-                'Item_No': item,
-                'Customer': 'All',
-                'Base_Quantity': 100,
-                'Growth_Rate': 0.05,
-                'Seasonality_Factor': 1.0
-            })
+        st.subheader("📋 Sales Summary")
+        st.write("Item and customer level summaries")
         
-        template_df = pd.DataFrame(template_data)
-        csv_template = template_df.to_csv(index=False)
-        b64 = base64.b64encode(csv_template.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="forecast_template.csv">📥 Download Template</a>'
+        item_summary = processed_data.groupby('Item No').agg({
+            'Sales_Revenue': ['sum', 'mean', 'count']
+        }).round(2)
+        item_summary.columns = ['Total_Revenue', 'Avg_Revenue', 'Transaction_Count']
+        item_summary = item_summary.reset_index()
+        
+        csv_summary = item_summary.to_csv(index=False)
+        b64 = base64.b64encode(csv_summary.encode()).decode()
+        href = f'<a href="data:file/csv;base64,{b64}" download="sales_summary.csv">📥 Download Sales Summary (CSV)</a>'
         st.markdown(href, unsafe_allow_html=True)
+        
+        st.dataframe(item_summary.head(10), use_container_width=True)
 
 if __name__ == "__main__":
     main()
